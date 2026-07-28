@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <!-- Благородный темно-синий фон с мягким скруглением -->
+  <rect width="512" height="512" rx="140" fill="#0a1f44"/>
+  
+  <!-- Бирюзовая арка коммуникации -->
+  <path d="M140 256c0-64 52-116 116-116s116 52 116 116" fill="none" stroke="#0a8a96" stroke-width="28" stroke-linecap="round"/>
+  
+  <!-- Геометрическая буква E -->
+  <path d="M200 156h112v36H242v44h56v36h-56v48h70v36H200V156z" fill="#ffffff"/>
+  
+  <!-- Золотая точка триумфа/результата -->
+  <circle cx="340" cy="356" r="20" fill="#b8922a"/>
+</svg>
