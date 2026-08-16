@@ -859,12 +859,11 @@ document.addEventListener('keydown',e=>{if(e.key==='Escape'&&mob.classList.conta
 const obs=new IntersectionObserver(entries=>{entries.forEach(e=>{if(e.isIntersecting){e.target.classList.add('v');obs.unobserve(e.target);}});},{threshold:.05,rootMargin:'0px 0px -24px 0px'});
 document.querySelectorAll('.reveal').forEach(el=>obs.observe(el));
 document.querySelectorAll('.faq-q').forEach(btn=>{btn.addEventListener('click',function(){const item=this.closest('.faq-item'),wasOpen=item.classList.contains('open');document.querySelectorAll('.faq-item.open').forEach(i=>{i.classList.remove('open');i.querySelector('.faq-q').setAttribute('aria-expanded','false');});if(!wasOpen){item.classList.add('open');this.setAttribute('aria-expanded','true');}});});
-// ===== Telegram + Яндекс.Метрика: настройки =====
-// ВАЖНО: этот токен уже был опубликован в открытом репозитории на GitHub.
-// Смените его как можно скорее через @BotFather (Bot Settings → Revoke current token),
-// иначе им может воспользоваться кто угодно, кто посмотрит исходный код страницы.
-const TG_BOT_TOKEN='8953394014:AAH2WQLjQyJckOD0oHpmmgJ2JBpReDPcsg0';
-const TG_CHAT_ID='1491085421';
+// ===== Приём заявок: настройки =====
+// Заявки теперь идут через Cloudflare Worker, а не напрямую в Telegram —
+// токен бота там и сюда больше не попадает. Впишите URL своего Worker'а
+// после деплоя (см. worker.js) — до этого форма работать не будет.
+const FORM_ENDPOINT='https://english.eugmks.workers.dev';
 // Номер счётчика Яндекс.Метрики — впишите после установки счётчика на сайт (сейчас не установлен).
 const YM_COUNTER_ID=null; // например: 12345678
 const YM_GOAL_NAME='lead_submit'; // имя цели в Метрике для успешной заявки
@@ -901,45 +900,52 @@ function fireYMGoal(){
   }
 }
 
-// ---- Валидация имени и контакта ----
-function validName(v){ return /^[a-zA-Zа-яА-ЯёЁ\s'-]{2,60}$/.test(v.trim()); }
+// ---- Имя: никогда не блокирует отправку — только чистим и подставляем
+// значение по умолчанию, если не указано (см. также worker.js — итоговая
+// проверка выполняется на сервере, эта копия только для мгновенной подсказки).
+function sanitizeName(v){
+  const cleaned=String(v||'').replace(/[\u0000-\u001F\u007F<>]/g,'').replace(/\s+/g,' ').trim().slice(0,60);
+  return cleaned.length>=2?cleaned:'Без имени';
+}
+// ---- Контакт: реально блокирует отправку — нерабочий контакт делает
+// заявку бесполезной. Ровно 11 цифр для российского номера (7/8 + 10 цифр);
+// 10 цифр без кода считаются обрезанным номером и отклоняются.
 function validContact(v){
-  const s=v.trim();
+  const s=(v||'').trim();
+  if(!s) return false;
   if(s.startsWith('@')) return /^@[a-zA-Z0-9_]{5,32}$/.test(s);
   if(/t\.me\//i.test(s)) return /^https?:\/\/t\.me\/[a-zA-Z0-9_]{5,32}$/i.test(s);
   const digits=s.replace(/\D/g,'');
-  return digits.length>=10 && digits.length<=15;
+  return /^[78]\d{10}$/.test(digits);
 }
 
-// ---- Отправка через Cloudflare Worker ----
-async function sendToTelegram(text, attempts = 3) {
-    for (let i = 0; i < attempts; i++) {
-        try {
-            const res = await fetch('https://english.eugmks.workers.dev', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ 
-                    data: { 
-                        name: "Заявка с сайта", 
-                        contact: text, 
-                        level: "" 
-                    } 
-                })
-            });
-            if (!res.ok) throw new Error('Worker error ' + res.status);
-            return true;
-        } catch (err) {
-            if (i === attempts - 1) throw err;
-            await new Promise(r => setTimeout(r, 600 * Math.pow(2, i)));
-        }
+// ---- Отправка на Worker с повторами (до 3 попыток) ----
+async function sendLead(payload,attempts=3){
+  for(let i=0;i<attempts;i++){
+    try{
+      const res=await fetch(FORM_ENDPOINT,{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload)
+      });
+      const data=await res.json().catch(()=>null);
+      if(!res.ok||!data||data.ok!==true)throw new Error('Form endpoint error '+res.status);
+      return data;
+    }catch(err){
+      if(i===attempts-1)throw err;
+      await new Promise(r=>setTimeout(r,600*Math.pow(2,i)));
     }
+  }
 }
 
 // ---- Резерв на случай, если все попытки не удались: сохраняем и пробуем при следующем визите ----
-function queueFailedLead(text,suspicious){
+// Важно: это помогает только если тот же посетитель вернётся на этом же
+// устройстве/браузере — localStorage не синхронизируется никуда. Полной
+// гарантии от потери заявки это не даёт, только смягчает единичные сбои сети.
+function queueFailedLead(payload){
   try{
     const q=JSON.parse(localStorage.getItem('pendingLeads')||'[]');
-    q.push({text,suspicious:!!suspicious,ts:Date.now()});
+    q.push({payload,ts:Date.now()});
     localStorage.setItem('pendingLeads',JSON.stringify(q.slice(-20)));
   }catch(e){}
 }
@@ -949,7 +955,7 @@ async function flushPendingLeads(){
   if(!q.length)return;
   const remaining=[];
   for(const item of q){
-    try{ await sendToTelegram(item.text,1); if(!item.suspicious)fireYMGoal(); }
+    try{ const r=await sendLead(item.payload,1); if(!r.suspicious)fireYMGoal(); }
     catch(e){ remaining.push(item); }
   }
   localStorage.setItem('pendingLeads',JSON.stringify(remaining));
@@ -975,32 +981,34 @@ document.getElementById('trialForm').addEventListener('submit',async e=>{
   }
 
   let ok=true;
-  if(!validName(nameEl.value)){nameEl.classList.add('err');setTimeout(()=>nameEl.classList.remove('err'),2200);ok=false;}
   if(!validContact(contactEl.value)){contactEl.classList.add('err');setTimeout(()=>contactEl.classList.remove('err'),2200);ok=false;}
   if(!ok)return;
 
   btn.innerHTML='Отправляю…';
   btn.disabled=true;
 
-  // Слишком быстрая отправка не блокируется (это может быть реальная заявка при автозаполнении),
-  // но помечается и не засчитывается как цель в Метрике.
-  const suspicious=(Date.now()-formLoadTime)<MIN_SUBMIT_MS;
   const clientId=await getYMClientID();
-  const utmLines=Object.keys(utmData).length
-    ? Object.entries(utmData).map(([k,v])=>`${k}: ${v}`).join('\n')
-    : 'без UTM-меток';
-  const flag=suspicious?'⚠️ Быстрая отправка (проверьте)\n':'';
-  const rawText=`${flag}🔔 НОВАЯ ЗАЯВКА С САЙТА\nИмя: ${nameEl.value.trim()}\nКонтакт: ${contactEl.value.trim()}\nУровень: ${lvl&&lvl.value?lvl.value:'не указан'}\n\n${utmLines}\nClientID: ${clientId||'—'}`;
+  const payload={
+    name:sanitizeName(nameEl.value),
+    contact:contactEl.value.trim(),
+    level:lvl&&lvl.value?lvl.value:'',
+    honeypot:hpEl?hpEl.value:'',
+    utm:utmData,
+    clientId,
+    pageUrl:location.href,
+    pageTitle:document.title,
+    submitMs:Date.now()-formLoadTime,
+  };
 
   try{
-    await sendToTelegram(rawText);
-    if(!suspicious)fireYMGoal();
+    const result=await sendLead(payload);
+    if(!result.suspicious)fireYMGoal();
     btn.innerHTML='&#10003; Заявка принята — свяжусь в\u00a0ближайшее время';
     btn.classList.add('ok');
     nameEl.value='';contactEl.value='';if(lvl)lvl.value='';
     setTimeout(()=>{btn.innerHTML=origHTML;btn.classList.remove('ok');btn.disabled=false;},5500);
   }catch(err){
-    queueFailedLead(rawText,suspicious);
+    queueFailedLead(payload);
     btn.innerHTML='Не\u00a0получилось. Напишите в\u00a0Telegram: @Eug001';
     btn.classList.add('err');
     setTimeout(()=>{btn.innerHTML=origHTML;btn.classList.remove('err');btn.disabled=false;},5500);
